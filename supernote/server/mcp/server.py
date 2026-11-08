@@ -23,7 +23,7 @@ from supernote.server.mcp.models import (
 )
 from supernote.server.services.coordination import CoordinationService
 from supernote.server.services.search import SearchService
-from supernote.server.services.user import API_KEY_PREFIX, UserService
+from supernote.server.services.user import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class SupernoteTokenVerifier(TokenVerifier):
         return SupernoteAccessToken(
             token=token,
             user_id=session.email,
-            client_id="api_key" if token.startswith(API_KEY_PREFIX) else "session",
+            client_id="api_key" if session.is_api_key else "session",
             scopes=["supernote:all"],
             expires_at=None,
         )

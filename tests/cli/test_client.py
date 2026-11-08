@@ -11,6 +11,9 @@ from supernote.cli.client import (
     add_parser,
     async_cloud_download,
     async_cloud_insights,
+    async_cloud_keys_create,
+    async_cloud_keys_list,
+    async_cloud_keys_revoke,
     async_cloud_login,
     async_cloud_ls,
     async_cloud_mkdir,
@@ -22,6 +25,9 @@ from supernote.cli.client import (
     setup_logging,
     subcommand_cloud_download,
     subcommand_cloud_insights,
+    subcommand_cloud_keys_create,
+    subcommand_cloud_keys_list,
+    subcommand_cloud_keys_revoke,
     subcommand_cloud_login,
     subcommand_cloud_ls,
     subcommand_cloud_mkdir,
@@ -30,7 +36,7 @@ from supernote.cli.client import (
     subcommand_cloud_socket,
     subcommand_cloud_upload,
 )
-from supernote.client.auth import FileCacheAuth
+from supernote.client.auth import ConstantAuth, FileCacheAuth
 from supernote.models.summary import AddSummaryDTO
 from supernote.server.db.models.file import UserFileDO
 from supernote.server.db.models.note_processing import NotePageContentDO
@@ -83,6 +89,34 @@ def test_add_parser() -> None:
     assert parsed.query == "meeting notes"
     assert parsed.top_n == 3
     assert parsed.func == subcommand_cloud_search
+
+    parsed = parser.parse_args(
+        [
+            "cloud",
+            "ls",
+            "/NOTE",
+            "--url",
+            "http://localhost:9000",
+            "--api-key",
+            "sn_test",
+        ]
+    )
+    assert parsed.url == "http://localhost:9000"
+    assert parsed.api_key == "sn_test"
+
+    parsed = parser.parse_args(["cloud", "keys", "list"])
+    assert parsed.keys_command == "list"
+    assert parsed.func == subcommand_cloud_keys_list
+
+    parsed = parser.parse_args(["cloud", "keys", "create", "Obsidian"])
+    assert parsed.keys_command == "create"
+    assert parsed.name == "Obsidian"
+    assert parsed.func == subcommand_cloud_keys_create
+
+    parsed = parser.parse_args(["cloud", "keys", "revoke", "abc123def456"])
+    assert parsed.keys_command == "revoke"
+    assert parsed.key_id == "abc123def456"
+    assert parsed.func == subcommand_cloud_keys_revoke
 
 
 def test_add_parser_socket() -> None:
@@ -317,3 +351,87 @@ async def test_async_cloud_socket_success(
     assert "Ping:" in captured.out
     assert "Status check:" in captured.out
     assert "Disconnected cleanly from Socket.IO server." in captured.out
+
+
+def test_load_cached_auth_with_api_key_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify load_cached_auth supports explicit --api-key and SUPERNOTE_API_KEY / SUPERNOTE_URL."""
+    # Missing URL when no cache exists exits cleanly with code 1
+    with pytest.raises(SystemExit) as exc_info:
+        load_cached_auth(url=None, api_key="sn_0123456789abcdef0123456789abcdef")
+    assert exc_info.value.code == 1
+    assert "Server URL required when using an API key" in capsys.readouterr().out
+
+    # Environment variable resolution
+    monkeypatch.setenv("SUPERNOTE_API_KEY", "sn_envkey0123456789abcdef01234567")
+    monkeypatch.setenv("SUPERNOTE_URL", "http://127.0.0.1:8080")
+    auth, resolved_url = load_cached_auth()
+    assert isinstance(auth, ConstantAuth)
+    assert auth.token == "sn_envkey0123456789abcdef01234567"
+    assert resolved_url == "http://127.0.0.1:8080"
+
+
+async def test_cloud_keys_cli_and_headless_api_key_execution(
+    cli_env: CliServerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify CLI API key management lifecycle and headless cloud commands without cached login."""
+    await async_cloud_keys_list()
+    assert "No active API keys." in capsys.readouterr().out
+
+    await async_cloud_keys_create("Headless Script")
+    create_out = capsys.readouterr().out
+    assert "Created API key 'Headless Script'" in create_out
+
+    raw_key = ""
+    key_id = ""
+    for line in create_out.splitlines():
+        if line.startswith("API Key: "):
+            raw_key = line.removeprefix("API Key: ").strip()
+        if "(ID: " in line:
+            key_id = line.split("(ID: ", 1)[1].rstrip(")")
+    assert raw_key.startswith("sn_")
+    assert len(key_id) == 12
+
+    await async_cloud_keys_list()
+    list_out = capsys.readouterr().out
+    assert key_id in list_out
+    assert "Headless Script" in list_out
+
+    # Delete local login cache and run cloud commands purely via headless API key + URL
+    cache_path = Path(os.path.expanduser("~/.cache/supernote.pkl"))
+    saved_cache = cache_path.read_bytes()
+    cache_path.unlink()
+    try:
+        await async_cloud_mkdir(
+            "/NOTE/Note/HeadlessFolder",
+            url=cli_env.url,
+            api_key=raw_key,
+        )
+        assert "Folder created successfully" in capsys.readouterr().out
+
+        monkeypatch.setenv("SUPERNOTE_API_KEY", raw_key)
+        monkeypatch.setenv("SUPERNOTE_URL", cli_env.url)
+        await async_cloud_ls("/NOTE/Note")
+        assert "HeadlessFolder" in capsys.readouterr().out
+
+        # Attempting key management with a static API key fails with 403 -> SystemExit(1)
+        with pytest.raises(SystemExit) as exc_info:
+            await async_cloud_keys_list()
+        assert exc_info.value.code == 1
+        capsys.readouterr()
+    finally:
+        monkeypatch.delenv("SUPERNOTE_API_KEY", raising=False)
+        monkeypatch.delenv("SUPERNOTE_URL", raising=False)
+        cache_path.write_bytes(saved_cache)
+
+    # Revoke key using interactive session cache, then verify headless key no longer works
+    await async_cloud_keys_revoke(key_id)
+    assert f"Revoked API key {key_id}" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc_info:
+        await async_cloud_ls("/", url=cli_env.url, api_key=raw_key)
+    assert exc_info.value.code == 1

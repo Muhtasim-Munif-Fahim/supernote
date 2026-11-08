@@ -50,6 +50,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
 }
 ACCESS_TOKEN = "x-access-token"
+AUTHORIZATION_HEADER = "Authorization"
+API_KEY_PREFIX = "sn_"
 XSRF_COOKIE = "XSRF-TOKEN"
 XSRF_HEADER = "X-XSRF-TOKEN"
 
@@ -115,10 +117,17 @@ class Client:
         self._xsrf_token = await self._get_csrf_token()
         headers[XSRF_HEADER] = self._xsrf_token
 
-        if self._auth and ACCESS_TOKEN not in headers:
+        if (
+            self._auth
+            and ACCESS_TOKEN not in headers
+            and AUTHORIZATION_HEADER not in headers
+        ):
             access_token = await self._auth.async_get_access_token()
             if access_token:
-                headers[ACCESS_TOKEN] = access_token
+                if access_token.startswith(API_KEY_PREFIX):
+                    headers[AUTHORIZATION_HEADER] = f"Bearer {access_token}"
+                else:
+                    headers[ACCESS_TOKEN] = access_token
         url = self._url(url)
         _LOGGER.debug(
             "request[%s]=%s %s %s",

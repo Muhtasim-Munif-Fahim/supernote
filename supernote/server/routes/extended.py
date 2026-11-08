@@ -43,6 +43,8 @@ from supernote.server.services.summary import SummaryService
 from supernote.server.services.user import UserService
 from supernote.server.utils.url_signer import UrlSigner, get_request_base_url
 
+from .decorators import interactive_session_only
+
 logger = logging.getLogger(__name__)
 
 routes = web.RouteTableDef()
@@ -333,21 +335,19 @@ async def handle_extended_note_cover(request: web.Request) -> web.Response:
 
 
 @routes.get("/api/extended/keys")
+@interactive_session_only
 async def handle_list_api_keys(request: web.Request) -> web.Response:
     # Endpoint: GET /api/extended/keys
     # Purpose: List active static Bearer API keys for the authenticated user.
     user_email = request["user"]
     user_service: UserService = request.app["user_service"]
-
     user_id = await user_service.get_user_id(user_email)
-    if not user_id:
-        return web.json_response({"error": "User not found"}, status=404)
-
     keys = await user_service.list_api_keys(user_id)
     return web.json_response(ApiKeyListResponseVO(keys=keys).to_dict())
 
 
 @routes.post("/api/extended/keys")
+@interactive_session_only
 async def handle_create_api_key(request: web.Request) -> web.Response:
     # Endpoint: POST /api/extended/keys
     # Purpose: Generate and return a new static Bearer API key.
@@ -370,13 +370,7 @@ async def handle_create_api_key(request: web.Request) -> web.Response:
 
     user_service: UserService = request.app["user_service"]
     user_id = await user_service.get_user_id(user_email)
-    if not user_id:
-        return web.json_response({"error": "User not found"}, status=404)
-
-    try:
-        raw_token, vo = await user_service.create_api_key(user_id, req_dto.name.strip())
-    except ValueError as err:
-        return web.json_response({"error": str(err)}, status=400)
+    raw_token, vo = await user_service.create_api_key(user_id, req_dto.name.strip())
 
     return web.json_response(
         CreateApiKeyResponseVO(
@@ -389,18 +383,14 @@ async def handle_create_api_key(request: web.Request) -> web.Response:
 
 
 @routes.delete("/api/extended/keys/{key_id}")
+@interactive_session_only
 async def handle_delete_api_key(request: web.Request) -> web.Response:
     # Endpoint: DELETE /api/extended/keys/{key_id}
     # Purpose: Revoke an existing static Bearer API key.
     user_email = request["user"]
-    key_id = request.match_info.get("key_id")
-    if not key_id:
-        return web.json_response({"error": "Missing key_id"}, status=400)
-
+    key_id = request.match_info["key_id"]
     user_service: UserService = request.app["user_service"]
     user_id = await user_service.get_user_id(user_email)
-    if not user_id:
-        return web.json_response({"error": "User not found"}, status=404)
 
     revoked = await user_service.revoke_api_key(user_id, key_id)
     if not revoked:

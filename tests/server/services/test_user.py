@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 import time
 
@@ -18,10 +17,11 @@ from supernote.models.user import (
     UserRegisterDTO,
 )
 from supernote.server.config import AuthConfig, ServerConfig
+from supernote.server.db.models.api_key import ApiKeyDO
 from supernote.server.db.models.user import UserDO
 from supernote.server.db.session import DatabaseSessionManager
 from supernote.server.services.coordination import CoordinationService
-from supernote.server.services.user import JWT_SECRET_KEY, UserService
+from supernote.server.services.user import JWT_SECRET_KEY, AuthMethod, UserService
 from supernote.server.utils.hashing import hash_with_salt
 
 
@@ -917,19 +917,19 @@ async def test_api_key_lifecycle_storage_and_verification(
     assert await coordination_service.get_value(f"api_key:{raw_token}") is None
 
     sha256_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    stored_raw = await coordination_service.get_value(f"api_key:{sha256_hash}")
-    assert stored_raw is not None
-    stored_data = json.loads(stored_raw)
-    assert stored_data == {
-        "id": vo.id,
-        "user_id": user1.id,
-        "name": "CLI Agent",
-        "key_prefix": vo.key_prefix,
-        "created_at": vo.created_at,
-        "sha256_hash": sha256_hash,
-        "last_used_at": None,
-        "is_active": True,
-    }
+    async with session_manager.session() as db:
+        stored_row = (
+            await db.execute(
+                select(ApiKeyDO).where(
+                    ApiKeyDO.user_id == user1.id, ApiKeyDO.id == vo.id
+                )
+            )
+        ).scalar_one()
+        assert stored_row.name == "CLI Agent"
+        assert stored_row.key_prefix == vo.key_prefix
+        assert stored_row.created_at == vo.created_at
+        assert stored_row.sha256_hash == sha256_hash
+        assert stored_row.last_used_at is None
 
     # User isolation in list_api_keys and revoke_api_key
     _, user2_vo = await user_service.create_api_key(user2.id, "Obsidian")
@@ -939,6 +939,8 @@ async def test_api_key_lifecycle_storage_and_verification(
     assert await user_service.revoke_api_key(user1.id, "missing_key") is False
 
     # verify_token authenticates static sn_... keys and records last_used_at
+    assert await user_service.verify_api_key("") is None
+    assert await user_service.verify_api_key("not_an_sn_token") is None
     assert (
         await user_service.verify_token("sn_0123456789abcdef0123456789abcdef") is None
     )
@@ -947,6 +949,14 @@ async def test_api_key_lifecycle_storage_and_verification(
     assert session_state.email == "apikey1@example.com"
     assert session_state.user_id == user1.id
     assert session_state.equipment_no is None
+    assert session_state.auth_method == AuthMethod.API_KEY
+    assert session_state.is_api_key is True
+
+    interactive_token = await user_service.create_session("apikey1@example.com")
+    interactive_state = await user_service.verify_token(interactive_token)
+    assert interactive_state is not None
+    assert interactive_state.auth_method == AuthMethod.SESSION
+    assert interactive_state.is_api_key is False
 
     listed_after_use = await user_service.list_api_keys(user1.id)
     assert listed_after_use[0].last_used_at is not None
@@ -987,7 +997,12 @@ async def test_api_key_lifecycle_storage_and_verification(
     assert await user_service.verify_token(raw_token) is None
     assert await user_service.list_api_keys(user1.id) == []
 
-    # Account deletion purges all remaining API keys for that user
+    # Account deletion and bulk revocation purge all remaining API keys for that user
+    bulk_token, _ = await user_service.create_api_key(user2.id, "Bulk Key")
+    assert await user_service.verify_token(bulk_token) is not None
+    await user_service.revoke_user_api_keys(user2.id)
+    assert await user_service.verify_token(bulk_token) is None
+
     user2_token, _ = await user_service.create_api_key(user2.id, "Second Key")
     assert await user_service.verify_token(user2_token) is not None
     await user_service.clear_account("apikey2@example.com")

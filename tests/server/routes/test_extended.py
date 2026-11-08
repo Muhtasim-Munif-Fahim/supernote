@@ -784,3 +784,30 @@ async def test_bearer_tokens_work_across_all_apis(
         "/api/file/capacity/query", json={}, headers=bearer_api_key_headers
     )
     assert revoked_resp.status == 401
+
+
+async def test_api_keys_denied_on_key_management_endpoints(
+    client: TestClient,
+    extended_client: ExtendedClient,
+) -> None:
+    """Verify static API keys cannot list, create, or delete API keys (no self-escalation)."""
+    created = await extended_client.create_api_key("Restricted Agent")
+    for headers in (
+        {"Authorization": f"Bearer {created.key}"},
+        {"x-access-token": created.key},
+    ):
+        list_resp = await client.get("/api/extended/keys", headers=headers)
+        assert list_resp.status == 403
+
+        create_resp = await client.post(
+            "/api/extended/keys",
+            json={"name": "Escalated Key"},
+            headers=headers,
+        )
+        assert create_resp.status == 403
+
+        delete_resp = await client.delete(
+            f"/api/extended/keys/{created.id}",
+            headers=headers,
+        )
+        assert delete_resp.status == 403

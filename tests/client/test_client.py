@@ -226,3 +226,44 @@ async def test_auth_token_missing(aiohttp_client: AiohttpClient) -> None:
     assert response.success
     headers = response.data
     assert "x-access-token" not in headers
+
+
+async def test_api_key_sends_authorization_bearer_header(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    """Test that static sn_... API keys send Authorization: Bearer rather than x-access-token."""
+
+    @dataclass
+    class HeadersResponse(BaseResponse):
+        data: dict[str, str] = field(default_factory=dict)
+
+    async def handler_headers(request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "success": True,
+                "data": dict(request.headers),
+            }
+        )
+
+    async def handler_csrf(request: web.Request) -> web.Response:
+        return web.Response(text="ok", headers={"X-XSRF-TOKEN": "test-token"})
+
+    app = web.Application()
+    app.router.add_get("/api/csrf", handler_csrf)
+    app.router.add_get("/headers", handler_headers)
+
+    test_client = await aiohttp_client(app)
+    base_url = str(test_client.make_url(""))
+
+    api_key = "sn_0123456789abcdef0123456789abcdef"
+    client = Client(
+        test_client.session,
+        host=base_url,
+        auth=ConstantAuth(api_key),
+    )
+
+    response = await client.get_json("headers", HeadersResponse)
+    assert response.success
+    headers = response.data
+    assert headers.get("Authorization") == f"Bearer {api_key}"
+    assert "x-access-token" not in headers

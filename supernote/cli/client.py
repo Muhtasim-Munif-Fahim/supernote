@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import traceback
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -21,30 +22,51 @@ from supernote.models.socket import SocketHandshakeParams
 from supernote.server.socket_auth import compute_handshake_signature
 
 
-def load_cached_auth(url: str | None = None) -> tuple[FileCacheAuth, str]:
-    """Load cached credentials."""
+def load_cached_auth(
+    url: str | None = None, api_key: str | None = None
+) -> tuple[ConstantAuth | FileCacheAuth, str]:
+    """Load credentials from explicit API key, environment variables, or disk cache."""
+    resolved_url = url or os.environ.get("SUPERNOTE_URL")
+    resolved_api_key = api_key or os.environ.get("SUPERNOTE_API_KEY")
     cache_path = os.path.expanduser("~/.cache/supernote.pkl")
-    if not os.path.exists(cache_path) and not url:
+
+    if resolved_api_key:
+        if not resolved_url and os.path.exists(cache_path):
+            resolved_url = FileCacheAuth(cache_path).get_host()
+        if not resolved_url:
+            print(
+                "Error: Server URL required when using an API key "
+                "(pass --url or set SUPERNOTE_URL)."
+            )
+            sys.exit(1)
+        return ConstantAuth(resolved_api_key), resolved_url
+
+    if not os.path.exists(cache_path) and not resolved_url:
         print(f"Error: No cached credentials found at {cache_path}")
-        print("Please run 'supernote cloud-login --url <URL>' first.")
+        print(
+            "Please run 'supernote cloud login --url <URL> <EMAIL>' "
+            "or set SUPERNOTE_API_KEY and SUPERNOTE_URL."
+        )
         sys.exit(1)
 
     auth = FileCacheAuth(cache_path)
-    if not url:
-        url = auth.get_host()
-        if not url:
+    if not resolved_url:
+        resolved_url = auth.get_host()
+        if not resolved_url:
             print("Error: No server URL found in cached credentials.")
-            print("Please run 'supernote cloud-login --url <URL>' first.")
+            print("Please run 'supernote cloud login --url <URL> <EMAIL>' first.")
             sys.exit(1)
 
-    return auth, url
+    return auth, resolved_url
 
 
 @asynccontextmanager
-async def create_session(url: str | None = None) -> Supernote:
-    """Initialize Supernote session with cached credentials."""
-    auth, url = load_cached_auth(url)
-    async with Supernote.from_auth(auth, host=url) as sn:
+async def create_session(
+    url: str | None = None, api_key: str | None = None
+) -> AsyncIterator[Supernote]:
+    """Initialize Supernote session with API key or cached credentials."""
+    auth, resolved_url = load_cached_auth(url=url, api_key=api_key)
+    async with Supernote.from_auth(auth, host=resolved_url) as sn:
         yield sn
 
 
@@ -217,12 +239,17 @@ def subcommand_cloud_login(args) -> None:
     asyncio.run(async_cloud_login(args.email, password, args.url, args.verbose))
 
 
-async def async_cloud_ls(path: str, verbose: bool = False) -> None:
-    """List files in Supernote Cloud using cached credentials."""
+async def async_cloud_ls(
+    path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
+) -> None:
+    """List files in Supernote Cloud using cached credentials or API key."""
     setup_logging(verbose)
 
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Using server: {sn.client.host}")
 
             print(f"Listing files in {path}...")
@@ -249,11 +276,22 @@ async def async_cloud_ls(path: str, verbose: bool = False) -> None:
 
 def subcommand_cloud_ls(args) -> None:
     """Handler for cloud-ls subcommand."""
-    asyncio.run(async_cloud_ls(args.path, args.verbose))
+    asyncio.run(
+        async_cloud_ls(
+            args.path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
 async def async_cloud_upload(
-    local_path: str, remote_path: str, verbose: bool = False
+    local_path: str,
+    remote_path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Upload a file to Supernote Cloud."""
     setup_logging(verbose)
@@ -266,7 +304,7 @@ async def async_cloud_upload(
         with open(local_path, "rb") as f:
             content = f.read()
 
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Uploading {local_path} to {remote_path}...")
             await sn.device.upload_content(remote_path, content)
             print("✓ Upload successful!")
@@ -285,17 +323,29 @@ def subcommand_cloud_upload(args) -> None:
     elif remote_path.endswith("/"):
         remote_path += os.path.basename(args.local_path)
 
-    asyncio.run(async_cloud_upload(args.local_path, remote_path, args.verbose))
+    asyncio.run(
+        async_cloud_upload(
+            args.local_path,
+            remote_path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
 async def async_cloud_download(
-    remote_path: str, local_path: str, verbose: bool = False
+    remote_path: str,
+    local_path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Download a file from Supernote Cloud."""
     setup_logging(verbose)
 
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Downloading {remote_path} to {local_path}...")
             content = await sn.device.download_content(path=remote_path)
 
@@ -315,15 +365,28 @@ def subcommand_cloud_download(args) -> None:
     elif os.path.isdir(local_path):
         local_path = os.path.join(local_path, os.path.basename(args.remote_path))
 
-    asyncio.run(async_cloud_download(args.remote_path, local_path, args.verbose))
+    asyncio.run(
+        async_cloud_download(
+            args.remote_path,
+            local_path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
-async def async_cloud_mkdir(path: str, verbose: bool = False) -> None:
+async def async_cloud_mkdir(
+    path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
+) -> None:
     """Create a folder in Supernote Cloud."""
     setup_logging(verbose)
 
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Creating folder: {path}...")
             await sn.device.create_folder(path, equipment_no="WEB")
             print("✓ Folder created successfully!")
@@ -334,15 +397,27 @@ async def async_cloud_mkdir(path: str, verbose: bool = False) -> None:
 
 def subcommand_cloud_mkdir(args) -> None:
     """Handler for cloud-mkdir subcommand."""
-    asyncio.run(async_cloud_mkdir(args.path, args.verbose))
+    asyncio.run(
+        async_cloud_mkdir(
+            args.path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
-async def async_cloud_rm(path: str, verbose: bool = False) -> None:
+async def async_cloud_rm(
+    path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
+) -> None:
     """Remove a file or folder from Supernote Cloud."""
     setup_logging(verbose)
 
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Removing {path}...")
             await sn.device.delete_by_path(path)
             print("✓ Removed successfully!")
@@ -351,12 +426,17 @@ async def async_cloud_rm(path: str, verbose: bool = False) -> None:
         sys.exit(1)
 
 
-async def async_cloud_insights(path: str, verbose: bool = False) -> None:
+async def async_cloud_insights(
+    path: str,
+    verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
+) -> None:
     """Show AI insights for a file in Supernote Cloud."""
     setup_logging(verbose)
 
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             print(f"Resolving path: {path}...")
             # Query by path to get ID
             info = await sn.device.query_by_path(path, equipment_no="CLI")
@@ -418,12 +498,26 @@ async def async_cloud_insights(path: str, verbose: bool = False) -> None:
 
 def subcommand_cloud_rm(args) -> None:
     """Handler for cloud-rm subcommand."""
-    asyncio.run(async_cloud_rm(args.path, args.verbose))
+    asyncio.run(
+        async_cloud_rm(
+            args.path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
 def subcommand_cloud_insights(args) -> None:
     """Handler for cloud-insights subcommand."""
-    asyncio.run(async_cloud_insights(args.path, args.verbose))
+    asyncio.run(
+        async_cloud_insights(
+            args.path,
+            args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
+        )
+    )
 
 
 async def async_cloud_search(
@@ -433,11 +527,13 @@ async def async_cloud_search(
     after: str | None = None,
     before: str | None = None,
     verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Perform semantic search."""
     setup_logging(verbose)
     try:
-        async with create_session() as sn:
+        async with create_session(url=url, api_key=api_key) as sn:
             extended_client = extended.ExtendedClient(sn.client)
             resp = await extended_client.search(
                 query=query,
@@ -484,6 +580,8 @@ def subcommand_cloud_search(args) -> None:
             args.after,
             args.before,
             args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
         )
     )
 
@@ -492,11 +590,13 @@ async def async_cloud_socket(
     duration: float = 10.0,
     conn_type: str = "ANDROID",
     verbose: bool = False,
+    url: str | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Connect to Socket.IO real-time server, verify heartbeat, and listen for events."""
     setup_logging(verbose)
     try:
-        auth_data, base_url = load_cached_auth()
+        auth_data, base_url = load_cached_auth(url=url, api_key=api_key)
         token = await auth_data.async_get_access_token()
 
         random_val = str(int(time.time() * 1000))
@@ -593,7 +693,87 @@ def subcommand_cloud_socket(args) -> None:
             duration=args.duration,
             conn_type=args.type,
             verbose=args.verbose,
+            url=getattr(args, "url", None),
+            api_key=getattr(args, "api_key", None),
         )
+    )
+
+
+async def async_cloud_keys_list(url: str | None = None, verbose: bool = False) -> None:
+    """List active static Bearer API keys for the logged-in user."""
+    setup_logging(verbose)
+    try:
+        async with create_session(url=url) as sn:
+            resp = await sn.extended.list_api_keys()
+            if not resp.keys:
+                print("No active API keys.")
+                return
+            print(
+                f"{'ID':<14} {'Name':<24} {'Prefix':<18} {'Created':<18} {'Last Used':<18}"
+            )
+            print("-" * 92)
+            for key in resp.keys:
+                created_str = datetime.fromtimestamp(key.created_at).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                last_used_str = (
+                    datetime.fromtimestamp(key.last_used_at).strftime("%Y-%m-%d %H:%M")
+                    if key.last_used_at
+                    else "Never"
+                )
+                print(
+                    f"{key.id:<14} {key.name:<24} {key.key_prefix:<18} "
+                    f"{created_str:<18} {last_used_str:<18}"
+                )
+    except SupernoteException as err:
+        print(f"Error: {err}")
+        sys.exit(1)
+
+
+async def async_cloud_keys_create(
+    name: str, url: str | None = None, verbose: bool = False
+) -> None:
+    """Create a new static Bearer API key for the logged-in user."""
+    setup_logging(verbose)
+    try:
+        async with create_session(url=url) as sn:
+            created = await sn.extended.create_api_key(name)
+            print(f"✓ Created API key '{created.name}' (ID: {created.id})")
+            print(f"API Key: {created.key}")
+            print("Save this key now — it will not be shown again.")
+    except SupernoteException as err:
+        print(f"Error: {err}")
+        sys.exit(1)
+
+
+async def async_cloud_keys_revoke(
+    key_id: str, url: str | None = None, verbose: bool = False
+) -> None:
+    """Revoke an existing static Bearer API key by ID."""
+    setup_logging(verbose)
+    try:
+        async with create_session(url=url) as sn:
+            await sn.extended.delete_api_key(key_id)
+            print(f"✓ Revoked API key {key_id}")
+    except SupernoteException as err:
+        print(f"Error: {err}")
+        sys.exit(1)
+
+
+def subcommand_cloud_keys_list(args) -> None:
+    """Handler for cloud keys list subcommand."""
+    asyncio.run(async_cloud_keys_list(url=args.url, verbose=args.verbose))
+
+
+def subcommand_cloud_keys_create(args) -> None:
+    """Handler for cloud keys create subcommand."""
+    asyncio.run(async_cloud_keys_create(args.name, url=args.url, verbose=args.verbose))
+
+
+def subcommand_cloud_keys_revoke(args) -> None:
+    """Handler for cloud keys revoke subcommand."""
+    asyncio.run(
+        async_cloud_keys_revoke(args.key_id, url=args.url, verbose=args.verbose)
     )
 
 
@@ -756,6 +936,22 @@ def subcommand_cloud_seed(args) -> None:
     )
 
 
+def _add_auth_args(parser) -> None:
+    """Register optional --url and --api-key overrides on a cloud subcommand parser."""
+    parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Server URL override (or set SUPERNOTE_URL)",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="Static Bearer API key override (or set SUPERNOTE_API_KEY)",
+    )
+
+
 def add_parser(subparsers):
     """Add the cloud subparser to the main subparsers."""
     cloud_parser = subparsers.add_parser("cloud", help="Interact with Supernote Cloud")
@@ -795,11 +991,53 @@ def add_parser(subparsers):
     )
     parser_login.set_defaults(func=subcommand_cloud_login)
 
+    # 'cloud keys' subcommand group
+    parser_keys = cloud_subparsers.add_parser(
+        "keys", help="Manage static Bearer API keys for headless clients and MCP"
+    )
+    keys_subparsers = parser_keys.add_subparsers(dest="keys_command", required=True)
+
+    parser_keys_list = keys_subparsers.add_parser(
+        "list", help="List active static Bearer API keys"
+    )
+    parser_keys_list.add_argument(
+        "--url", type=str, default=None, help="Server URL override"
+    )
+    parser_keys_list.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
+    parser_keys_list.set_defaults(func=subcommand_cloud_keys_list)
+
+    parser_keys_create = keys_subparsers.add_parser(
+        "create", help="Create a new static Bearer API key"
+    )
+    parser_keys_create.add_argument("name", type=str, help="Descriptive key name")
+    parser_keys_create.add_argument(
+        "--url", type=str, default=None, help="Server URL override"
+    )
+    parser_keys_create.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
+    parser_keys_create.set_defaults(func=subcommand_cloud_keys_create)
+
+    parser_keys_revoke = keys_subparsers.add_parser(
+        "revoke", help="Revoke an existing static Bearer API key"
+    )
+    parser_keys_revoke.add_argument("key_id", type=str, help="Key ID to revoke")
+    parser_keys_revoke.add_argument(
+        "--url", type=str, default=None, help="Server URL override"
+    )
+    parser_keys_revoke.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
+    parser_keys_revoke.set_defaults(func=subcommand_cloud_keys_revoke)
+
     # 'cloud ls' subcommand
     parser_ls = cloud_subparsers.add_parser("ls", help="List files in Supernote Cloud")
     parser_ls.add_argument(
         "path", type=str, nargs="?", default="/", help="Path to list"
     )
+    _add_auth_args(parser_ls)
     parser_ls.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -813,6 +1051,7 @@ def add_parser(subparsers):
     parser_upload.add_argument(
         "remote_path", type=str, nargs="?", help="Cloud destination path (optional)"
     )
+    _add_auth_args(parser_upload)
     parser_upload.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -826,6 +1065,7 @@ def add_parser(subparsers):
     parser_download.add_argument(
         "local_path", type=str, nargs="?", help="Local destination path (optional)"
     )
+    _add_auth_args(parser_download)
     parser_download.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -836,6 +1076,7 @@ def add_parser(subparsers):
         "mkdir", help="Create a folder in Supernote Cloud"
     )
     parser_mkdir.add_argument("path", type=str, help="Cloud folder path")
+    _add_auth_args(parser_mkdir)
     parser_mkdir.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -846,6 +1087,7 @@ def add_parser(subparsers):
         "rm", help="Remove a file or folder from Supernote Cloud"
     )
     parser_rm.add_argument("path", type=str, help="Cloud file or folder path")
+    _add_auth_args(parser_rm)
     parser_rm.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -856,6 +1098,7 @@ def add_parser(subparsers):
         "insights", help="Show AI insights and synthesis for a notebook"
     )
     parser_insights.add_argument("path", type=str, help="Cloud file path (.note)")
+    _add_auth_args(parser_insights)
     parser_insights.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -878,6 +1121,7 @@ def add_parser(subparsers):
     parser_search.add_argument(
         "--before", type=str, help="Filter by date before (YYYY-MM-DD)"
     )
+    _add_auth_args(parser_search)
     parser_search.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
@@ -900,6 +1144,7 @@ def add_parser(subparsers):
         default="ANDROID",
         help="Handshake connection type parameter (default: ANDROID)",
     )
+    _add_auth_args(parser_socket)
     parser_socket.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
