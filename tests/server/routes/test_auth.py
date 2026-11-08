@@ -745,6 +745,11 @@ async def test_api_keys_denied_on_account_mutation_endpoints(
     )
     assert clear_resp.status == 403
 
+    login_records_resp = await client.post(
+        "/api/user/query/loginRecord", headers=api_headers, json={}
+    )
+    assert login_records_resp.status == 403
+
     # Original interactive session remains intact
     check_resp = await client.post(
         "/api/user/query",

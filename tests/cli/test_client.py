@@ -382,9 +382,10 @@ async def test_cloud_keys_cli_and_headless_api_key_execution(
     await async_cloud_keys_list()
     assert "No active API keys." in capsys.readouterr().out
 
-    await async_cloud_keys_create("Headless Script")
+    await async_cloud_keys_create("Headless Script", expires_days=7)
     create_out = capsys.readouterr().out
     assert "Created API key 'Headless Script'" in create_out
+    assert "Expires:" in create_out
 
     raw_key = ""
     key_id = ""
@@ -394,7 +395,7 @@ async def test_cloud_keys_cli_and_headless_api_key_execution(
         if "(ID: " in line:
             key_id = line.split("(ID: ", 1)[1].rstrip(")")
     assert raw_key.startswith("sn_")
-    assert len(key_id) == 12
+    assert len(key_id) == 16
 
     await async_cloud_keys_list()
     list_out = capsys.readouterr().out

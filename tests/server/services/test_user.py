@@ -1,10 +1,12 @@
 import hashlib
 import logging
 import time
+from contextlib import asynccontextmanager
+from unittest.mock import patch
 
 import jwt
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from supernote.models.auth import Equipment, LoginVO
 from supernote.models.base import ErrorCode
@@ -20,8 +22,15 @@ from supernote.server.config import AuthConfig, ServerConfig
 from supernote.server.db.models.api_key import ApiKeyDO
 from supernote.server.db.models.user import UserDO
 from supernote.server.db.session import DatabaseSessionManager
+from supernote.server.exceptions import DatabaseError
 from supernote.server.services.coordination import CoordinationService
-from supernote.server.services.user import JWT_SECRET_KEY, AuthMethod, UserService
+from supernote.server.services.user import (
+    JWT_SECRET_KEY,
+    MAX_API_KEY_NAME_LENGTH,
+    MAX_API_KEYS_PER_USER,
+    AuthMethod,
+    UserService,
+)
 from supernote.server.utils.hashing import hash_with_salt
 
 
@@ -906,11 +915,12 @@ async def test_api_key_lifecycle_storage_and_verification(
     raw_token, vo = await user_service.create_api_key(user1.id, "  CLI Agent  ")
     assert raw_token.startswith("sn_")
     assert len(raw_token) == 35
-    assert len(vo.id) == 12
+    assert len(vo.id) == 16
     assert vo.name == "CLI Agent"
     assert vo.key_prefix == f"{raw_token[:11]}..."
     assert vo.created_at <= int(time.time())
     assert vo.last_used_at is None
+    assert vo.expires_at is None
 
     # Raw token is never persisted in plaintext
     assert await coordination_service.get_value(raw_token) is None
@@ -1008,3 +1018,120 @@ async def test_api_key_lifecycle_storage_and_verification(
     await user_service.clear_account("apikey2@example.com")
     assert await user_service.verify_token(user2_token) is None
     assert await user_service.list_api_keys(user2.id) == []
+
+
+async def test_api_key_adversarial_bounds_expiry_debouncing_and_recovery(
+    user_service: UserService,
+    session_manager: DatabaseSessionManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify API key input bounds, per-user cap, expiry, telemetry fault-isolation, FK cascade, and password-reset eviction."""
+    pw_md5 = hashlib.md5(b"password123").hexdigest()
+    new_pw_md5 = hashlib.md5(b"rotated_password").hexdigest()
+    user = await user_service.register(
+        UserRegisterDTO(email="hardened@example.com", password=pw_md5)
+    )
+
+    # 1. Name length & control-character bounds
+    with pytest.raises(ValueError, match="cannot exceed"):
+        await user_service.create_api_key(user.id, "a" * (MAX_API_KEY_NAME_LENGTH + 1))
+
+    for bad_name in (
+        "Inject\x1b[31mANSI",
+        "Null\x00Byte",
+        "Line\nBreak",
+        "Del\x7fChar",
+    ):
+        with pytest.raises(ValueError, match="control characters"):
+            await user_service.create_api_key(user.id, bad_name)
+
+    # 2. Strict token format gate rejects malformed / oversized tokens without hashing
+    for malformed in (
+        "sn_short",
+        "sn_" + "g" * 32,
+        "sn_" + "a" * 33,
+        "sn_" + "a" * 100_000,
+    ):
+        assert await user_service.verify_api_key(malformed) is None
+
+    # 3. Expiration validation & enforcement
+    now = int(time.time())
+    with pytest.raises(ValueError, match="future"):
+        await user_service.create_api_key(user.id, "Already Expired", expires_at=now)
+
+    exp_token, exp_vo = await user_service.create_api_key(
+        user.id, "Short Lived", expires_at=now + 10
+    )
+    assert exp_vo.expires_at == now + 10
+    with patch("supernote.server.services.user.time.time", return_value=float(now + 5)):
+        state = await user_service.verify_api_key(exp_token)
+        assert state is not None
+        assert state.expires_at == now + 10
+    with patch(
+        "supernote.server.services.user.time.time", return_value=float(now + 10)
+    ):
+        assert await user_service.verify_api_key(exp_token) is None
+    await user_service.revoke_api_key(user.id, exp_vo.id)
+
+    # 4. Telemetry last_used_at debouncing (60s window) & write-failure fault isolation
+    live_token, live_vo = await user_service.create_api_key(user.id, "Burst Key")
+    real_session_ctx = session_manager.session
+
+    @asynccontextmanager
+    async def failing_second_session():
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise DatabaseError("SQLite database is locked")
+        async with real_session_ctx() as s:
+            yield s
+
+    calls = {"count": 0}
+    with (
+        patch.object(session_manager, "session", side_effect=failing_second_session),
+        caplog.at_level(logging.WARNING),
+    ):
+        # Even when the last_used_at write transaction fails with DatabaseError, auth still succeeds!
+        resilient_state = await user_service.verify_api_key(live_token)
+        assert resilient_state is not None
+        assert "Failed to update last_used_at" in caplog.text
+
+    # Normal verification records last_used_at, and immediate repeat within 60s skips DB write
+    t0 = 1_800_000_000
+    with patch("supernote.server.services.user.time.time", return_value=float(t0)):
+        assert await user_service.verify_api_key(live_token) is not None
+    assert (await user_service.list_api_keys(user.id))[0].last_used_at == t0
+
+    with patch("supernote.server.services.user.time.time", return_value=float(t0 + 30)):
+        assert await user_service.verify_api_key(live_token) is not None
+    # Still t0 because 30s < 60s debounce window
+    assert (await user_service.list_api_keys(user.id))[0].last_used_at == t0
+
+    with patch("supernote.server.services.user.time.time", return_value=float(t0 + 61)):
+        assert await user_service.verify_api_key(live_token) is not None
+    assert (await user_service.list_api_keys(user.id))[0].last_used_at == t0 + 61
+
+    # 5. Compromise recovery: update_password, admin_reset_password, and retrieve_password evict API keys
+    await user_service.update_password(
+        "hardened@example.com", UpdatePasswordDTO(password=new_pw_md5)
+    )
+    assert await user_service.verify_api_key(live_token) is None
+
+    k_admin, _ = await user_service.create_api_key(user.id, "Backdoor 1")
+    await user_service.admin_reset_password("hardened@example.com", pw_md5)
+    assert await user_service.verify_api_key(k_admin) is None
+
+    k_retrieve, _ = await user_service.create_api_key(user.id, "Backdoor 2")
+    assert await user_service.retrieve_password("hardened@example.com", new_pw_md5)
+    assert await user_service.verify_api_key(k_retrieve) is None
+
+    # 6. Per-user key cap enforcement
+    for idx in range(MAX_API_KEYS_PER_USER):
+        await user_service.create_api_key(user.id, f"Key {idx}")
+    with pytest.raises(ValueError, match="Maximum of"):
+        await user_service.create_api_key(user.id, "Overflow Key")
+
+    # 7. SQLite PRAGMA foreign_keys=ON enforces ON DELETE CASCADE when UserDO is deleted directly
+    async with session_manager.session() as db:
+        await db.execute(delete(UserDO).where(UserDO.id == user.id))
+        await db.commit()
+    assert await user_service.list_api_keys(user.id) == []

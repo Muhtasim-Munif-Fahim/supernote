@@ -23,11 +23,12 @@ def upgrade() -> None:
         "api_keys",
         sa.Column("user_id", sa.Integer(), nullable=False),
         sa.Column("id", sa.String(length=32), nullable=False),
-        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("name", sa.String(length=128), nullable=False),
         sa.Column("key_prefix", sa.String(length=32), nullable=False),
         sa.Column("sha256_hash", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.Integer(), nullable=False),
         sa.Column("last_used_at", sa.Integer(), nullable=True),
+        sa.Column("expires_at", sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("user_id", "id"),
     )

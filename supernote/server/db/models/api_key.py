@@ -16,7 +16,7 @@ class ApiKeyDO(Base):
         index=True,
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
     sha256_hash: Mapped[str] = mapped_column(
         String(64), unique=True, index=True, nullable=False
@@ -25,6 +25,7 @@ class ApiKeyDO(Base):
     last_used_at: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )
+    expires_at: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     def __repr__(self) -> str:
         return f"<ApiKeyDO(user_id={self.user_id}, id='{self.id}', name='{self.name}')>"

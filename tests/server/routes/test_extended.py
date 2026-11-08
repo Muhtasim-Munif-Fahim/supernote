@@ -695,13 +695,34 @@ async def test_extended_api_keys_crud_lifecycle(
     assert bad_name.status == 400
     assert "Key name cannot be empty" in (await bad_name.json())["error"]
 
+    overlong_name = await client.post(
+        "/api/extended/keys", json={"name": "x" * 101}, headers=auth_headers
+    )
+    assert overlong_name.status == 400
+
+    control_char_name = await client.post(
+        "/api/extended/keys",
+        json={"name": "Bad\x1b[31mName"},
+        headers=auth_headers,
+    )
+    assert control_char_name.status == 400
+
+    for bad_days in (0, -5, 3651, True):
+        bad_exp = await client.post(
+            "/api/extended/keys",
+            json={"name": "Bad Expiry", "expiresInDays": bad_days},
+            headers=auth_headers,
+        )
+        assert bad_exp.status == 400
+
     created_1 = await extended_client.create_api_key("Claude Desktop")
     assert created_1.success is True
-    assert len(created_1.id) == 12
+    assert len(created_1.id) == 16
     assert created_1.name == "Claude Desktop"
     assert created_1.key.startswith("sn_")
     assert len(created_1.key) == 35
     assert created_1.created_at > 0
+    assert created_1.expires_at is None
 
     listed_1 = await extended_client.list_api_keys()
     assert len(listed_1.keys) == 1
@@ -710,8 +731,13 @@ async def test_extended_api_keys_crud_lifecycle(
     assert listed_1.keys[0].key_prefix == f"{created_1.key[:11]}..."
     assert listed_1.keys[0].created_at == created_1.created_at
     assert listed_1.keys[0].last_used_at is None
+    assert listed_1.keys[0].expires_at is None
 
-    created_2 = await extended_client.create_api_key("Obsidian Sync")
+    created_2 = await extended_client.create_api_key(
+        "Obsidian Sync", expires_in_days=30
+    )
+    assert created_2.expires_at is not None
+    assert created_2.expires_at > created_2.created_at
     listed_2 = await extended_client.list_api_keys()
     assert {k.id for k in listed_2.keys} == {created_1.id, created_2.id}
 

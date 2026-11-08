@@ -515,6 +515,7 @@ async def handle_retrieve_password(request: web.Request) -> web.Response:
 # TODO: Also implement sensitive query operations and record them for all operations
 # done on the user (update, edit settings, reset passwd, etc)
 @routes.post("/api/user/query/loginRecord")
+@interactive_session_only
 async def handle_login_record(request: web.Request) -> web.Response:
     """Query login records."""
     account = request.get("user")

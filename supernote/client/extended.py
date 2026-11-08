@@ -93,9 +93,11 @@ class ExtendedClient:
         """List active static Bearer API keys for the current user (Extension)."""
         return await self._client.get_json("/api/extended/keys", ApiKeyListResponseVO)
 
-    async def create_api_key(self, name: str) -> CreateApiKeyResponseVO:
+    async def create_api_key(
+        self, name: str, expires_in_days: int | None = None
+    ) -> CreateApiKeyResponseVO:
         """Create a new static Bearer API key (Extension)."""
-        dto = CreateApiKeyDTO(name=name)
+        dto = CreateApiKeyDTO(name=name, expires_in_days=expires_in_days)
         return await self._client.post_json(
             "/api/extended/keys", CreateApiKeyResponseVO, json=dto.to_dict()
         )

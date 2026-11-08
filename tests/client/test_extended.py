@@ -238,7 +238,7 @@ async def test_extended_client_api_key_methods(aiohttp_client: AiohttpClient) ->
     )
     ext = ExtendedClient(base_client)
 
-    created = await ext.create_api_key("Claude Code")
+    created = await ext.create_api_key("Claude Code", expires_in_days=30)
     assert created.id == "k1"
     assert created.key == "sn_abcdef0123456789abcdef0123456789"
 
@@ -250,7 +250,7 @@ async def test_extended_client_api_key_methods(aiohttp_client: AiohttpClient) ->
     assert deleted.success is True
 
     assert recorded == [
-        ("POST", "/api/extended/keys", {"name": "Claude Code"}),
+        ("POST", "/api/extended/keys", {"name": "Claude Code", "expiresInDays": 30}),
         ("GET", "/api/extended/keys", None),
         ("DELETE", "/api/extended/keys/k1", None),
     ]

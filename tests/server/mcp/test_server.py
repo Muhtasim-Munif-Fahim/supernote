@@ -36,14 +36,19 @@ async def test_token_verifier_static_key_session_and_oauth(
     verifier = SupernoteTokenVerifier(user_service, coordination_service)
 
     assert await verifier.verify_token("sn_invalid_token_1234567890abcdef") is None
+    assert await verifier.verify_token("") is None
+    assert await verifier.verify_token("x" * 5000) is None
 
-    # Valid static Bearer API key
-    raw_token, key_vo = await user_service.create_api_key(user.id, "Test Verifier")
+    # Valid static Bearer API key (bypasses coordination_service lookup and binds numeric user_id)
+    raw_token, key_vo = await user_service.create_api_key(
+        user.id, "Test Verifier", expires_at=2_000_000_000
+    )
     result = await verifier.verify_token(raw_token)
     assert result is not None
-    assert result.user_id == "mcpuser@example.com"
+    assert result.user_id == str(user.id)
     assert result.scopes == ["supernote:all"]
     assert result.client_id == "api_key"
+    assert result.expires_at == 2_000_000_000
 
     # Revoked static Bearer API key
     await user_service.revoke_api_key(user.id, key_vo.id)
@@ -53,7 +58,7 @@ async def test_token_verifier_static_key_session_and_oauth(
     session_jwt = await user_service.create_session("mcpuser@example.com")
     session_result = await verifier.verify_token(session_jwt)
     assert session_result is not None
-    assert session_result.user_id == "mcpuser@example.com"
+    assert session_result.user_id == str(user.id)
     assert session_result.client_id == "session"
     assert session_result.scopes == ["supernote:all"]
 

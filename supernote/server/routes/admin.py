@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from functools import wraps
 
 from aiohttp import web
 from mashumaro.exceptions import InvalidFieldValue, MissingField
@@ -31,6 +32,7 @@ def require_admin(
 ) -> Callable[[web.Request], Awaitable[web.Response]]:
     """Decorator to require admin privileges over an interactive session."""
 
+    @wraps(handler)
     async def wrapper(request: web.Request) -> web.Response:
         if request.get("auth_method") == AuthMethod.API_KEY:
             return web.json_response(

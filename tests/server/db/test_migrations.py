@@ -828,8 +828,8 @@ def test_api_keys_table_migration(tmp_path: Path, alembic_config: Config) -> Non
         )
         conn.execute(
             text(
-                "INSERT INTO api_keys (user_id, id, name, key_prefix, sha256_hash, created_at, last_used_at) "
-                "VALUES (201, 'key001', 'CLI', 'sn_00001111...', :digest, 1700000000, NULL)"
+                "INSERT INTO api_keys (user_id, id, name, key_prefix, sha256_hash, created_at, last_used_at, expires_at) "
+                "VALUES (201, 'key001', 'CLI', 'sn_00001111...', :digest, 1700000000, NULL, 1702592000)"
             ),
             {"digest": "a" * 64},
         )
@@ -837,11 +837,11 @@ def test_api_keys_table_migration(tmp_path: Path, alembic_config: Config) -> Non
     with engine.connect() as conn:
         row = conn.execute(
             text(
-                "SELECT user_id, id, name, key_prefix FROM api_keys WHERE id = 'key001'"
+                "SELECT user_id, id, name, key_prefix, expires_at FROM api_keys WHERE id = 'key001'"
             )
         ).fetchone()
         assert row is not None
-        assert tuple(row) == (201, "key001", "CLI", "sn_00001111...")
+        assert tuple(row) == (201, "key001", "CLI", "sn_00001111...", 1702592000)
 
     command.downgrade(alembic_config, "d5e6f7a8b9c0")
     reflected = MetaData()

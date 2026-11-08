@@ -699,6 +699,11 @@ def subcommand_cloud_socket(args) -> None:
     )
 
 
+def _sanitize_terminal_text(value: str) -> str:
+    """Strip ASCII control and ANSI escape characters before printing untrusted text."""
+    return "".join(ch for ch in value if ord(ch) >= 32 and ord(ch) != 127)
+
+
 async def async_cloud_keys_list(url: str | None = None, verbose: bool = False) -> None:
     """List active static Bearer API keys for the logged-in user."""
     setup_logging(verbose)
@@ -709,10 +714,12 @@ async def async_cloud_keys_list(url: str | None = None, verbose: bool = False) -
                 print("No active API keys.")
                 return
             print(
-                f"{'ID':<14} {'Name':<24} {'Prefix':<18} {'Created':<18} {'Last Used':<18}"
+                f"{'ID':<18} {'Name':<24} {'Prefix':<18} "
+                f"{'Created':<18} {'Last Used':<18} {'Expires':<18}"
             )
-            print("-" * 92)
+            print("-" * 116)
             for key in resp.keys:
+                safe_name = _sanitize_terminal_text(key.name)
                 created_str = datetime.fromtimestamp(key.created_at).strftime(
                     "%Y-%m-%d %H:%M"
                 )
@@ -721,9 +728,14 @@ async def async_cloud_keys_list(url: str | None = None, verbose: bool = False) -
                     if key.last_used_at
                     else "Never"
                 )
+                expires_str = (
+                    datetime.fromtimestamp(key.expires_at).strftime("%Y-%m-%d %H:%M")
+                    if key.expires_at
+                    else "Never"
+                )
                 print(
-                    f"{key.id:<14} {key.name:<24} {key.key_prefix:<18} "
-                    f"{created_str:<18} {last_used_str:<18}"
+                    f"{key.id:<18} {safe_name:<24} {key.key_prefix:<18} "
+                    f"{created_str:<18} {last_used_str:<18} {expires_str:<18}"
                 )
     except SupernoteException as err:
         print(f"Error: {err}")
@@ -731,15 +743,26 @@ async def async_cloud_keys_list(url: str | None = None, verbose: bool = False) -
 
 
 async def async_cloud_keys_create(
-    name: str, url: str | None = None, verbose: bool = False
+    name: str,
+    url: str | None = None,
+    expires_days: int | None = None,
+    verbose: bool = False,
 ) -> None:
     """Create a new static Bearer API key for the logged-in user."""
     setup_logging(verbose)
     try:
         async with create_session(url=url) as sn:
-            created = await sn.extended.create_api_key(name)
-            print(f"✓ Created API key '{created.name}' (ID: {created.id})")
+            created = await sn.extended.create_api_key(
+                name, expires_in_days=expires_days
+            )
+            safe_name = _sanitize_terminal_text(created.name)
+            print(f"✓ Created API key '{safe_name}' (ID: {created.id})")
             print(f"API Key: {created.key}")
+            if created.expires_at:
+                expires_str = datetime.fromtimestamp(created.expires_at).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                print(f"Expires: {expires_str}")
             print("Save this key now — it will not be shown again.")
     except SupernoteException as err:
         print(f"Error: {err}")
@@ -767,7 +790,14 @@ def subcommand_cloud_keys_list(args) -> None:
 
 def subcommand_cloud_keys_create(args) -> None:
     """Handler for cloud keys create subcommand."""
-    asyncio.run(async_cloud_keys_create(args.name, url=args.url, verbose=args.verbose))
+    asyncio.run(
+        async_cloud_keys_create(
+            args.name,
+            url=args.url,
+            expires_days=getattr(args, "expires_days", None),
+            verbose=args.verbose,
+        )
+    )
 
 
 def subcommand_cloud_keys_revoke(args) -> None:
@@ -1012,6 +1042,12 @@ def add_parser(subparsers):
         "create", help="Create a new static Bearer API key"
     )
     parser_keys_create.add_argument("name", type=str, help="Descriptive key name")
+    parser_keys_create.add_argument(
+        "--expires-days",
+        type=int,
+        default=None,
+        help="Optional key expiration in days (1-3650; default: never)",
+    )
     parser_keys_create.add_argument(
         "--url", type=str, default=None, help="Server URL override"
     )

@@ -229,6 +229,9 @@ class ApiKeyVO(DataClassJSONMixin):
     last_used_at: int | None = field(
         metadata=field_options(alias="lastUsedAt"), default=None
     )
+    expires_at: int | None = field(
+        metadata=field_options(alias="expiresAt"), default=None
+    )
 
     class Config(BaseConfig):
         serialize_by_alias = True
@@ -242,6 +245,9 @@ class CreateApiKeyDTO(DataClassJSONMixin):
     """
 
     name: str
+    expires_in_days: int | None = field(
+        metadata=field_options(alias="expiresInDays"), default=None
+    )
 
     class Config(BaseConfig):
         serialize_by_alias = True
@@ -258,6 +264,9 @@ class CreateApiKeyResponseVO(BaseResponse):
     name: str = ""
     key: str = ""
     created_at: int = field(metadata=field_options(alias="createdAt"), default=0)
+    expires_at: int | None = field(
+        metadata=field_options(alias="expiresAt"), default=None
+    )
 
     class Config(BaseConfig):
         serialize_by_alias = True

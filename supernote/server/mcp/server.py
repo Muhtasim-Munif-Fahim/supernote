@@ -23,9 +23,10 @@ from supernote.server.mcp.models import (
 )
 from supernote.server.services.coordination import CoordinationService
 from supernote.server.services.search import SearchService
-from supernote.server.services.user import UserService
+from supernote.server.services.user import API_KEY_PREFIX, UserService
 
 logger = logging.getLogger(__name__)
+MAX_MCP_TOKEN_LENGTH = 4096
 
 # Global services to be injected by the app
 _services: dict[str, Any] = {
@@ -56,27 +57,31 @@ class SupernoteTokenVerifier(TokenVerifier):
         self.coordination_service = coordination_service
 
     async def verify_token(self, token: str) -> SupernoteAccessToken | None:
-        key = f"mcp:access_token:{token}"
-        data = await self.coordination_service.get_value(key)
-        if data:
-            token_data = json.loads(data)
-            return SupernoteAccessToken(
-                token=token,
-                user_id=token_data.get("user_id"),
-                client_id=token_data.get("client_id", "unknown"),
-                scopes=token_data.get("scopes", []),
-                resource=token_data.get("resource"),
-            )
+        if not token or len(token) > MAX_MCP_TOKEN_LENGTH:
+            return None
+
+        if not token.startswith(API_KEY_PREFIX):
+            key = f"mcp:access_token:{token}"
+            data = await self.coordination_service.get_value(key)
+            if data:
+                token_data = json.loads(data)
+                return SupernoteAccessToken(
+                    token=token,
+                    user_id=token_data.get("user_id"),
+                    client_id=token_data.get("client_id", "unknown"),
+                    scopes=token_data.get("scopes", []),
+                    resource=token_data.get("resource"),
+                )
 
         session = await self.user_service.verify_token(token)
         if not session:
             return None
         return SupernoteAccessToken(
             token=token,
-            user_id=session.email,
+            user_id=str(session.user_id),
             client_id="api_key" if session.is_api_key else "session",
             scopes=["supernote:all"],
-            expires_at=None,
+            expires_at=session.expires_at,
         )
 
 

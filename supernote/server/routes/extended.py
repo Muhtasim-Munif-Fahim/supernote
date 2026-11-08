@@ -6,6 +6,7 @@ to our new server.
 
 import json
 import logging
+import time
 
 from aiohttp import web
 from mashumaro.exceptions import InvalidFieldValue, MissingField
@@ -354,6 +355,15 @@ async def handle_create_api_key(request: web.Request) -> web.Response:
     user_email = request["user"]
     try:
         data = await request.json()
+        if not isinstance(data, dict):
+            return web.json_response(
+                {"error": "Request body must be a JSON object"}, status=400
+            )
+        if isinstance(data.get("expiresInDays"), bool):
+            return web.json_response(
+                {"error": "expiresInDays must be an integer between 1 and 3650"},
+                status=400,
+            )
         req_dto = CreateApiKeyDTO.from_dict(data)
     except (
         json.JSONDecodeError,
@@ -368,9 +378,26 @@ async def handle_create_api_key(request: web.Request) -> web.Response:
     if not req_dto.name or not req_dto.name.strip():
         return web.json_response({"error": "Key name cannot be empty"}, status=400)
 
+    expires_at: int | None = None
+    if req_dto.expires_in_days is not None:
+        if (
+            isinstance(req_dto.expires_in_days, bool)
+            or req_dto.expires_in_days <= 0
+            or req_dto.expires_in_days > 3650
+        ):
+            return web.json_response(
+                {"error": "expiresInDays must be between 1 and 3650"}, status=400
+            )
+        expires_at = int(time.time()) + req_dto.expires_in_days * 86400
+
     user_service: UserService = request.app["user_service"]
     user_id = await user_service.get_user_id(user_email)
-    raw_token, vo = await user_service.create_api_key(user_id, req_dto.name.strip())
+    try:
+        raw_token, vo = await user_service.create_api_key(
+            user_id, req_dto.name.strip(), expires_at=expires_at
+        )
+    except ValueError as err:
+        return web.json_response({"error": str(err)}, status=400)
 
     return web.json_response(
         CreateApiKeyResponseVO(
@@ -378,6 +405,7 @@ async def handle_create_api_key(request: web.Request) -> web.Response:
             name=vo.name,
             key=raw_token,
             created_at=vo.created_at,
+            expires_at=vo.expires_at,
         ).to_dict()
     )
 

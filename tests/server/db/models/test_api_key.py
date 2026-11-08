@@ -19,6 +19,7 @@ async def test_api_key_crud(db_session: AsyncSession) -> None:
         sha256_hash="0" * 64,
         created_at=1700000000,
         last_used_at=None,
+        expires_at=1702592000,
     )
     db_session.add(api_key)
     await db_session.commit()
@@ -35,4 +36,5 @@ async def test_api_key_crud(db_session: AsyncSession) -> None:
     assert fetched.sha256_hash == "0" * 64
     assert fetched.created_at == 1700000000
     assert fetched.last_used_at is None
+    assert fetched.expires_at == 1702592000
     assert "a1b2c3d4e5f6" in repr(fetched)
